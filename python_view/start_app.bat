@@ -1,0 +1,3 @@
+@echo off
+echo Запуск диспетчера задач...
+start "" "%~dp0dist\task_manager\task_manager.exe" 

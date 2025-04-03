@@ -8,16 +8,12 @@ from collections import deque
 import getpass
 import warnings
 
-import psutil
-import win32security
-import win32api
-import win32con
+
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QPointF, QTimer
-from PyQt5.QtGui import QColor, QFont, QPalette, QIcon, QPainter
+from PyQt5.QtGui import QColor, QFont, QPainter
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QTableWidget, QTableWidgetItem, QHeaderView, QPushButton, QLabel,
-    QGridLayout, QComboBox, QMessageBox, QMenu
+    QTableWidget, QTableWidgetItem, QHeaderView, QPushButton, QLabel, QGridLayout
 )
 from PyQt5.QtChart import QChart, QChartView, QLineSeries, QValueAxis
 from concurrent.futures import ThreadPoolExecutor
@@ -26,91 +22,8 @@ from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
 
 # Константы для доступа к процессам
-SE_DEBUG_NAME = "SeDebugPrivilege"
-SE_PRIVILEGE_ENABLED = 0x00000002
-TOKEN_ADJUST_PRIVILEGES = 0x0020
-TOKEN_QUERY = 0x0008
-
-# Константы для прав доступа
-PROCESS_QUERY_INFORMATION = 0x0400
-PROCESS_VM_READ = 0x0010
-PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PROCESS_TERMINATE = 0x0001
 
-# Структуры для Windows API
-class SYSTEM_PERFORMANCE_INFO(ctypes.Structure):
-    _fields_ = [
-        ("IdleTime", ctypes.c_int64),
-        ("KernelTime", ctypes.c_int64),
-        ("UserTime", ctypes.c_int64),
-        ("Reserved1", ctypes.c_int64 * 2),
-        ("IoReadTransferCount", ctypes.c_int64),
-        ("IoWriteTransferCount", ctypes.c_int64),
-        ("Reserved2", ctypes.c_int64 * 2),
-        ("SystemCalls", ctypes.c_uint32),
-    ]
-
-class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
-    _fields_ = [
-        ("cb", wintypes.DWORD),
-        ("PageFaultCount", wintypes.DWORD),
-        ("PeakWorkingSetSize", ctypes.c_size_t),
-        ("WorkingSetSize", ctypes.c_size_t),
-        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-        ("QuotaPagedPoolUsage", ctypes.c_size_t),
-        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-        ("PagefileUsage", ctypes.c_size_t),
-        ("PeakPagefileUsage", ctypes.c_size_t)
-    ]
-
-class MEMORYSTATUSEX(ctypes.Structure):
-    _fields_ = [
-        ("dwLength", wintypes.DWORD),
-        ("dwMemoryLoad", wintypes.DWORD),
-        ("ullTotalPhys", ctypes.c_ulonglong),
-        ("ullAvailPhys", ctypes.c_ulonglong),
-        ("ullTotalPageFile", ctypes.c_ulonglong),
-        ("ullAvailPageFile", ctypes.c_ulonglong),
-        ("ullTotalVirtual", ctypes.c_ulonglong),
-        ("ullAvailVirtual", ctypes.c_ulonglong),
-        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-    ]
-
-class FILETIME(ctypes.Structure):
-    _fields_ = [
-        ("dwLowDateTime", wintypes.DWORD),
-        ("dwHighDateTime", wintypes.DWORD)
-    ]
-
-class IO_COUNTERS(ctypes.Structure):
-    _fields_ = [
-        ("ReadOperationCount", ctypes.c_ulonglong),
-        ("WriteOperationCount", ctypes.c_ulonglong),
-        ("OtherOperationCount", ctypes.c_ulonglong),
-        ("ReadTransferCount", ctypes.c_ulonglong),
-        ("WriteTransferCount", ctypes.c_ulonglong),
-        ("OtherTransferCount", ctypes.c_ulonglong)
-    ]
-
-# Структура для привилегий
-class LUID(ctypes.Structure):
-    _fields_ = [
-        ("LowPart", ctypes.c_ulong),
-        ("HighPart", ctypes.c_long)
-    ]
-
-class LUID_AND_ATTRIBUTES(ctypes.Structure):
-    _fields_ = [
-        ("Luid", LUID),
-        ("Attributes", ctypes.c_ulong)
-    ]
-
-class TOKEN_PRIVILEGES(ctypes.Structure):
-    _fields_ = [
-        ("PrivilegeCount", ctypes.c_ulong),
-        ("Privileges", LUID_AND_ATTRIBUTES * 1)
-    ]
 
 # Определяем функцию debug_print на уровне модуля (в начале файла)
 ENABLE_LOGGING = True  # Включаем логирование для диагностики
@@ -121,42 +34,23 @@ def debug_print(*args, **kwargs):
 
 
 # Игнорируем предупреждения от PyQt
-import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 class SystemMetrics:
     def __init__(self):
-        # Повышаем привилегии при создании экземпляра
-        self._enable_debug_privilege()
-        
         # Инициализируем переменные для работы с DLL
-        self.is_dll_loaded = False
         self.process_dll = None
+        self.use_dll = False
+        self.ProcessInfoStruct = None
         
-        # Инициализируем переменные для производительности
-        self._prev_cpu_totals = None
-        
-        # Для дисковой активности
-        self._prev_disk_counters = {}
-        self._last_disk_update = time.time()
-        self._last_disk_counters = None
-        self._last_disk_time = time.time()
-        
-        # Для сетевой активности
-        self._prev_net_counters = {}
-        self._last_network_update = time.time()
-        self._last_network_counters = None
-        self._last_network_time = time.time()
-        
-        self._process_times = {}  # Для расчета CPU
-        self._process_io = {}  # Для хранения предыдущих значений IO
-        
-        # Добавляем словари для хранения истории значений дисковой и сетевой активности
-        self._disk_history = {}
-        self._network_history = {}
-        
-        # Инициализируем счетчики производительности
-        self._setup_performance_counters()
+        # Кеширование данных
+        self._process_data_cache = {}  # Кеш данных процессов
+        self._last_update_time = 0     # Время последнего обновления
+        self._system_cpu_usage = 0.0   # Общая загрузка CPU
+        self._system_memory = {"total": 0, "available": 0, "percent": 0}  # Память
+        self._system_disk_io = {"read_bytes": 0.0, "write_bytes": 0.0}    # Диск
+        self._system_network_io = {"bytes_sent": 0.0, "bytes_recv": 0.0}  # Сеть
+        self._last_system_update = 0   # Время последнего обновления системных метрик
         
         # Загружаем DLL для мониторинга процессов
         try:
@@ -167,7 +61,6 @@ class SystemMetrics:
                 # Если запущено как exe (PyInstaller)
                 base_path = os.path.dirname(sys.executable)
                 dll_paths.append(os.path.join(base_path, "Dll2.dll"))
-                dll_paths.append(os.path.join(base_path, "x64", "Debug", "Dll2.dll"))
                 # Добавим поиск в текущем каталоге для EXE
                 dll_paths.append("Dll2.dll")
             else:
@@ -226,551 +119,163 @@ class SystemMetrics:
         except Exception as e:
             debug_print(f"Ошибка загрузки DLL: {e}")
             self.use_dll = False
-            debug_print("Система будет работать без DLL, используя стандартные методы")
+            debug_print("Система не сможет работать без DLL")
             
-        self._prev_cpu_times = self._get_cpu_times()
+    def get_processes_from_dll(self):
+        """Получает информацию о всех процессах через WinAPI и DLL"""
+        if not self.use_dll or not self.process_dll:
+            debug_print("DLL не загружена, невозможно получить данные")
+            return []
         
-        # Получаем начальные значения для дисковой и сетевой активности
-        self._prev_disk_counters = self._get_disk_counters()
-        self._prev_net_counters = self._get_network_counters()
-        
-    def _enable_debug_privilege(self):
-        """Повышает привилегии процесса для доступа к системным процессам"""
-        try:
-            debug_print("Попытка получения привилегии SeDebugPrivilege...")
-            
-            # Получаем handle на kernel32.dll и advapi32.dll
-            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
-            advapi32 = ctypes.WinDLL('advapi32', use_last_error=True)
-            
-            # Объявляем типы для функций
-            OpenProcessToken = advapi32.OpenProcessToken
-            OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
-            OpenProcessToken.restype = wintypes.BOOL
-            
-            LookupPrivilegeValueW = advapi32.LookupPrivilegeValueW
-            LookupPrivilegeValueW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.POINTER(LUID)]
-            LookupPrivilegeValueW.restype = wintypes.BOOL
-            
-            AdjustTokenPrivileges = advapi32.AdjustTokenPrivileges
-            AdjustTokenPrivileges.argtypes = [wintypes.HANDLE, wintypes.BOOL, ctypes.POINTER(TOKEN_PRIVILEGES), 
-                                           wintypes.DWORD, ctypes.POINTER(TOKEN_PRIVILEGES), ctypes.POINTER(wintypes.DWORD)]
-            AdjustTokenPrivileges.restype = wintypes.BOOL
-            
-            # Открываем токен текущего процесса
-            hToken = wintypes.HANDLE()
-            if not OpenProcessToken(kernel32.GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ctypes.byref(hToken)):
-                debug_print(f"Не удалось открыть токен процесса: {ctypes.get_last_error()}")
-                return False
-            
-            # Получаем LUID для привилегии SeDebugPrivilege
-            luid = LUID()
-            if not LookupPrivilegeValueW(None, SE_DEBUG_NAME, ctypes.byref(luid)):
-                debug_print(f"Не удалось найти значение привилегии: {ctypes.get_last_error()}")
-                kernel32.CloseHandle(hToken)
-                return False
-            
-            # Подготавливаем структуру TOKEN_PRIVILEGES
-            tp = TOKEN_PRIVILEGES()
-            tp.PrivilegeCount = 1
-            tp.Privileges[0].Luid = luid
-            tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
-            
-            # Устанавливаем привилегию SeDebugPrivilege
-            if not AdjustTokenPrivileges(hToken, False, ctypes.byref(tp), ctypes.sizeof(TOKEN_PRIVILEGES), None, None):
-                debug_print(f"Не удалось настроить привилегии токена: {ctypes.get_last_error()}")
-                kernel32.CloseHandle(hToken)
-                return False
-            
-            error = ctypes.get_last_error()
-            if error != 0:
-                debug_print(f"AdjustTokenPrivileges успешно, но возможно не применены все запрашиваемые привилегии. Код ошибки: {error}")
-            else:
-                debug_print("SeDebugPrivilege успешно включена!")
-            
-            kernel32.CloseHandle(hToken)
-            return True
-        except Exception as e:
-            debug_print(f"Ошибка при включении SeDebugPrivilege: {e}")
-            return False
-        
-    def _setup_performance_counters(self):
-        self.kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
-        self.psapi = ctypes.WinDLL('psapi', use_last_error=True)
-        self.pdh = ctypes.WinDLL('pdh', use_last_error=True)
-        
-        # Настраиваем типы для функций
-        self.kernel32.GetSystemTimes.argtypes = [
-            ctypes.POINTER(FILETIME),
-            ctypes.POINTER(FILETIME),
-            ctypes.POINTER(FILETIME)
-        ]
-        self.kernel32.GetSystemTimes.restype = wintypes.BOOL
-        
-        self.kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MEMORYSTATUSEX)]
-        self.kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
-        
-        # Добавляем определение для GetProcessMemoryInfo
-        self.psapi.GetProcessMemoryInfo.argtypes = [
-            wintypes.HANDLE,
-            ctypes.POINTER(PROCESS_MEMORY_COUNTERS),
-            wintypes.DWORD
-        ]
-        self.psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
-
-        # Добавляем определение для GetProcessIoCounters
-        self.kernel32.GetProcessIoCounters.argtypes = [
-            wintypes.HANDLE,
-            ctypes.POINTER(IO_COUNTERS)
-        ]
-        self.kernel32.GetProcessIoCounters.restype = wintypes.BOOL
-
-    def _get_cpu_times(self) -> dict:
-        idle_time = FILETIME()
-        kernel_time = FILETIME()
-        user_time = FILETIME()
-        
-        if not self.kernel32.GetSystemTimes(
-            ctypes.byref(idle_time),
-            ctypes.byref(kernel_time),
-            ctypes.byref(user_time)
-        ):
-            return {'idle': 0, 'kernel': 0, 'user': 0}
-            
-        return {
-            'idle': (idle_time.dwHighDateTime << 32) | idle_time.dwLowDateTime,
-            'kernel': (kernel_time.dwHighDateTime << 32) | kernel_time.dwLowDateTime,
-            'user': (user_time.dwHighDateTime << 32) | user_time.dwLowDateTime
-        }
-
-    def get_cpu_usage(self) -> float:
-        current = self._get_cpu_times()
-        prev = self._prev_cpu_times
-        
-        idle_diff = current['idle'] - prev['idle']
-        kernel_diff = current['kernel'] - prev['kernel']
-        user_diff = current['user'] - prev['user']
-        total_diff = kernel_diff + user_diff
-        
-        self._prev_cpu_times = current
-        if total_diff > 0:
-            return 100.0 * (1.0 - idle_diff / total_diff)
-        return 0.0
-
-    def get_memory_info(self) -> dict:
-        meminfo = MEMORYSTATUSEX()
-        meminfo.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-        
-        if not self.kernel32.GlobalMemoryStatusEx(ctypes.byref(meminfo)):
-            return {'total': 0, 'available': 0, 'percent': 0}
-            
-        return {
-            'total': meminfo.ullTotalPhys,
-            'available': meminfo.ullAvailPhys,
-            'percent': meminfo.dwMemoryLoad
-        }
-
-    def _get_disk_counters(self) -> dict:
-        counters = {'read_bytes': 0, 'write_bytes': 0}
-        try:
-            # Используем Windows Performance Counters через ctypes
-            query = ctypes.c_void_p()
-            self.pdh.PdhOpenQueryW(None, 0, ctypes.byref(query))
-            
-            counter_read = ctypes.c_void_p()
-            counter_write = ctypes.c_void_p()
-            
-            self.pdh.PdhAddCounterW(
-                query,
-                "\\PhysicalDisk(_Total)\\Disk Read Bytes/sec",
-                0,
-                ctypes.byref(counter_read)
-            )
-            self.pdh.PdhAddCounterW(
-                query,
-                "\\PhysicalDisk(_Total)\\Disk Write Bytes/sec",
-                0,
-                ctypes.byref(counter_write)
-            )
-            
-            self.pdh.PdhCollectQueryData(query)
-            
-            value = wintypes.DWORD()
-            self.pdh.PdhGetFormattedCounterValue(
-                counter_read,
-                0x00000100,  # PDH_FMT_LONG
-                None,
-                ctypes.byref(value)
-            )
-            counters['read_bytes'] = value.value
-            
-            self.pdh.PdhGetFormattedCounterValue(
-                counter_write,
-                0x00000100,  # PDH_FMT_LONG
-                None,
-                ctypes.byref(value)
-            )
-            counters['write_bytes'] = value.value
-            
-            self.pdh.PdhCloseQuery(query)
-        except Exception:
-            pass
-        return counters
-
-    def _get_network_counters(self) -> dict:
-        counters = {'bytes_sent': 0, 'bytes_recv': 0}
-        try:
-            query = ctypes.c_void_p()
-            self.pdh.PdhOpenQueryW(None, 0, ctypes.byref(query))
-            
-            counter_sent = ctypes.c_void_p()
-            counter_recv = ctypes.c_void_p()
-            
-            self.pdh.PdhAddCounterW(
-                query,
-                "\\Network Interface(*)\\Bytes Sent/sec",
-                0,
-                ctypes.byref(counter_sent)
-            )
-            self.pdh.PdhAddCounterW(
-                query,
-                "\\Network Interface(*)\\Bytes Received/sec",
-                0,
-                ctypes.byref(counter_recv)
-            )
-            
-            self.pdh.PdhCollectQueryData(query)
-            
-            value = wintypes.DWORD()
-            self.pdh.PdhGetFormattedCounterValue(
-                counter_sent,
-                0x00000100,  # PDH_FMT_LONG
-                None,
-                ctypes.byref(value)
-            )
-            counters['bytes_sent'] = value.value
-            
-            self.pdh.PdhGetFormattedCounterValue(
-                counter_recv,
-                0x00000100,  # PDH_FMT_LONG
-                None,
-                ctypes.byref(value)
-            )
-            counters['bytes_recv'] = value.value
-            
-            self.pdh.PdhCloseQuery(query)
-        except Exception:
-            pass
-        return counters
-
-    def get_disk_io(self) -> dict:
-        """Получает информацию о дисковой активности в МБ/с, используя данные DLL"""
-        if self.use_dll and self.process_dll:
-            try:
-                # Получение данных напрямую из DLL для всех процессов
-                total_read = 0.0
-                total_write = 0.0
-                processes = self.get_processes()
-                
-                # Суммируем данные о дисковой активности всех процессов
-                for proc in processes:
-                    total_read += proc.get('disk_read', 0.0)
-                    total_write += proc.get('disk_write', 0.0)
-                
-                # Применяем масштабирование для лучшей видимости
-                return {
-                    'read_bytes': total_read,
-                    'write_bytes': total_write
-                }
-            except Exception as e:
-                debug_print(f"Ошибка при получении дисковой активности из DLL: {e}")
-        
-        # Если DLL не доступен или произошла ошибка, используем стандартный метод
-        current_time = time.time()
-        current = self._get_disk_counters()
-        
-        # Проверяем, есть ли предыдущие значения
-        if not self._last_disk_counters:
-            self._last_disk_counters = current
-            self._last_disk_time = current_time
-            return {'read_bytes': 0.5, 'write_bytes': 0.5}
-        
-        # Вычисляем разницу во времени
-        time_diff = current_time - self._last_disk_time
-        if time_diff < 0.1:
-            time_diff = 0.1
-        
-        # Вычисляем скорость в МБ/с
-        read_diff = current['read_bytes'] - self._last_disk_counters['read_bytes']
-        write_diff = current['write_bytes'] - self._last_disk_counters['write_bytes']
-        
-        read_speed = (read_diff / time_diff) / (1024 * 1024)
-        write_speed = (write_diff / time_diff) / (1024 * 1024)
-        
-        # Обновляем предыдущие значения
-        self._last_disk_counters = current
-        self._last_disk_time = current_time
-        
-        return {'read_bytes': read_speed, 'write_bytes': write_speed}
-        
-    def get_network_io(self) -> dict:
-        """Получает информацию о сетевой активности в МБ/с, используя данные DLL"""
-        if self.use_dll and self.process_dll:
-            try:
-                # Получение данных напрямую из DLL для всех процессов
-                total_sent = 0.0
-                total_recv = 0.0
-                processes = self.get_processes()
-                
-                # Суммируем данные о сетевой активности всех процессов
-                for proc in processes:
-                    total_sent += proc.get('network_sent', 0.0)
-                    total_recv += proc.get('network_recv', 0.0)
-                
-                # Применяем масштабирование для лучшей видимости
-                return {
-                    'bytes_sent': total_sent,
-                    'bytes_recv': total_recv
-                }
-            except Exception as e:
-                debug_print(f"Ошибка при получении сетевой активности из DLL: {e}")
-        
-        # Если DLL не доступен или произошла ошибка, используем стандартный метод
-        current_time = time.time()
-        current = self._get_network_counters()
-        
-        # Проверяем, есть ли предыдущие значения
-        if not self._last_network_counters:
-            self._last_network_counters = current
-            self._last_network_time = current_time
-            return {'bytes_sent': 0.5, 'bytes_recv': 0.5}
-        
-        # Вычисляем разницу во времени
-        time_diff = current_time - self._last_network_time
-        if time_diff < 0.1:
-            time_diff = 0.1
-        
-        # Вычисляем скорость в МБ/с
-        sent_diff = current['bytes_sent'] - self._last_network_counters['bytes_sent']
-        recv_diff = current['bytes_recv'] - self._last_network_counters['bytes_recv']
-        
-        sent_speed = (sent_diff / time_diff) / (1024 * 1024)
-        recv_speed = (recv_diff / time_diff) / (1024 * 1024)
-        
-        # Обновляем предыдущие значения
-        self._last_network_counters = current
-        self._last_network_time = current_time
-        
-        return {'bytes_sent': sent_speed, 'bytes_recv': recv_speed}
-
-    def get_cpu_freq(self) -> dict:
-        try:
-            # Используем Windows Management API через ctypes
-            freq = ctypes.c_uint64()
-            if self.kernel32.QueryPerformanceFrequency(ctypes.byref(freq)):
-                return {'current': freq.value / 1000000.0}  # Конвертируем в MHz
-        except Exception:
-            pass
-        return {'current': 0.0}
-
-    def get_boot_time(self) -> float:
-        try:
-            return self.kernel32.GetTickCount64() / 1000.0
-        except Exception:
-            return time.time()
-
-    def get_process_io_counters(self, handle, pid) -> dict:
-        """Получает информацию о дисковой и сетевой активности процесса"""
-        io = IO_COUNTERS()
-        current_time = time.time()
-        
-        if not self.kernel32.GetProcessIoCounters(handle, ctypes.byref(io)):
-            return {
-                'disk_read': 0.0,
-                'disk_write': 0.0,
-                'network_sent': 0.0,
-                'network_recv': 0.0
-            }
-            
-        current_io = {
-            'time': current_time,
-            'read': io.ReadTransferCount,
-            'write': io.WriteTransferCount,
-            'other': io.OtherTransferCount
-        }
-        
-        if pid in self._process_io:
-            prev_io = self._process_io[pid]
-            time_diff = current_time - prev_io['time']
-            
-            if time_diff > 0:
-                # Конвертируем байты в мегабайты и применяем масштабирование
-                disk_scale = 2.5  # Коэффициент для диска
-                net_scale = 2.0   # Коэффициент для сети
-                
-                disk_read = (current_io['read'] - prev_io['read']) / (time_diff * 1024 * 1024) * disk_scale
-                disk_write = (current_io['write'] - prev_io['write']) / (time_diff * 1024 * 1024) * disk_scale
-                
-                # Разделяем сетевой трафик поровну между отправкой и получением
-                network_total = (current_io['other'] - prev_io['other']) / (time_diff * 1024 * 1024) * net_scale
-                network_sent = network_total * 0.4  # 40% на исходящий трафик
-                network_recv = network_total * 0.6  # 60% на входящий трафик
-                
-                self._process_io[pid] = current_io
-                return {
-                    'disk_read': disk_read,
-                    'disk_write': disk_write,
-                    'network_sent': network_sent,
-                    'network_recv': network_recv
-                }
-        
-        self._process_io[pid] = current_io
-        return {
-            'disk_read': 0.0,
-            'disk_write': 0.0,
-            'network_sent': 0.0,
-            'network_recv': 0.0
-        }
-
-    def get_processes(self) -> list:
-        """Получает список процессов с дополнительной информацией от DLL"""
         processes = []
         
         try:
-            debug_print("Повышаем привилегии перед получением процессов")
-            self._enable_debug_privilege()
+            # Получаем список всех процессов через WinAPI
+            process_ids = (wintypes.DWORD * 4096)()
+            cb_needed = wintypes.DWORD()
             
-            debug_print("Получаем список процессов")
-            # Если DLL доступен и загружен, используем её для получения информации о процессах
-            if self.use_dll and self.process_dll:
-                try:
-                    # Получаем список всех процессов
-                    process_ids = (wintypes.DWORD * 4096)()
-                    cb_needed = wintypes.DWORD()
-                    
-                    if not self.psapi.EnumProcesses(
-                        ctypes.byref(process_ids),
-                        ctypes.sizeof(process_ids),
-                        ctypes.byref(cb_needed)
-                    ):
-                        debug_print("Не удалось перечислить процессы")
-                        # Продолжаем со стандартной реализацией
-                    else:
-                        # Количество возвращенных процессов
-                        num_processes = cb_needed.value // ctypes.sizeof(wintypes.DWORD)
-                        debug_print(f"Найдено {num_processes} процессов")
-                        
-                        for i in range(num_processes):
-                            pid = process_ids[i]
-                            if pid <= 0:
-                                continue
-                            
-                            try:
-                                # Получаем информацию из DLL
-                                proc_info = self.process_dll.GetProcessInfo(pid)
-                                
-                                # Проверяем, что имя процесса не пустое и процесс существует
-                                if proc_info.processName and proc_info.processName != "":
-                                    processes.append({
-                                        'pid': pid,
-                                        'name': proc_info.processName,
-                                        'cpu_percent': proc_info.cpuUsage,
-                                        'memory_info': {
-                                            'rss': proc_info.memoryUsage
-                                        },
-                                        'disk_read': proc_info.diskReadRate,
-                                        'disk_write': proc_info.diskWriteRate,
-                                        'network_sent': proc_info.networkSent,
-                                        'network_recv': proc_info.networkReceived,
-                                        # Добавляем флаг для системных процессов
-                                        'is_system': pid < 100 or proc_info.processName.lower() in ['system', 'registry', 'smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe']
-                                    })
-                            except Exception as e:
-                                debug_print(f"Ошибка получения информации о процессе {pid}: {e}")
-                                continue
-                        
-                        if len(processes) > 0:
-                            debug_print(f"Успешно получено {len(processes)} процессов через DLL")
-                            return processes
-                        else:
-                            debug_print("DLL не вернула процессы, используем Python-метод")
-                except Exception as e:
-                    debug_print(f"Ошибка получения процессов через DLL: {e}")
-                    # Если DLL метод не сработал, продолжаем стандартным способом
+            # Получаем список PID всех процессов
+            if not ctypes.windll.psapi.EnumProcesses(
+                ctypes.byref(process_ids),
+                ctypes.sizeof(process_ids),
+                ctypes.byref(cb_needed)
+            ):
+                debug_print("Не удалось перечислить процессы")
+                return []
             
-            # Стандартный метод через psutil
-            debug_print("Используем psutil для получения процессов")
-            ps_processes = []
-            for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info', 'io_counters', 'username']):
+            # Количество возвращенных процессов
+            num_processes = cb_needed.value // ctypes.sizeof(wintypes.DWORD)
+            debug_print(f"Найдено {num_processes} процессов")
+            
+            # Переменные для подсчета общих метрик системы
+            total_cpu_usage = 0.0
+            total_memory_usage = 0
+            total_disk_read = 0.0
+            total_disk_write = 0.0
+            total_network_sent = 0.0
+            total_network_recv = 0.0
+            
+            current_time = time.time()
+            
+            # Для каждого процесса получаем информацию из DLL
+            for i in range(num_processes):
+                pid = process_ids[i]
+                if pid <= 0:
+                    continue
+                
                 try:
-                    # Получаем основную информацию
-                    proc_info = proc.info
-                    process_data = {
-                        'pid': proc_info['pid'],
-                        'name': proc_info['name'],
-                        'cpu_percent': proc_info['cpu_percent'],
-                        'memory_info': proc_info['memory_info']._asdict() if proc_info['memory_info'] else {'rss': 0},
-                        'username': proc_info.get('username', 'N/A'),
-                        'is_system': proc_info['pid'] < 100 or proc_info['name'].lower() in ['system', 'registry', 'smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe']
-                    }
+                    # Получаем информацию из DLL
+                    proc_info = self.process_dll.GetProcessInfo(pid)
                     
-                    # Получаем данные I/O
-                    io_counters = proc_info.get('io_counters')
-                    if io_counters:
-                        # Получаем текущее время
-                        current_time = time.time()
-                        
-                        # Проверяем, есть ли предыдущие значения
-                        if proc_info['pid'] in self._process_io:
-                            prev_io = self._process_io[proc_info['pid']]['counters']
-                            prev_time = self._process_io[proc_info['pid']]['time']
-                            
-                            # Вычисляем разницу во времени
-                            time_diff = current_time - prev_time
-                            if time_diff > 0:
-                                # Масштабирующие коэффициенты
-                                disk_scale = 1.0
-                                net_scale = 1.0
-                                
-                                # Получаем текущие значения счетчиков
-                                read_bytes = io_counters.read_bytes
-                                write_bytes = io_counters.write_bytes
-                                other_bytes = io_counters.other_bytes if hasattr(io_counters, 'other_bytes') else 0
-                                
-                                # Вычисляем скорость
-                                read_rate = (read_bytes - prev_io['read_bytes']) / (time_diff * 1024 * 1024) * disk_scale
-                                write_rate = (write_bytes - prev_io['write_bytes']) / (time_diff * 1024 * 1024) * disk_scale
-                                net_rate = (other_bytes - prev_io['other_bytes']) / (time_diff * 1024 * 1024) * net_scale if hasattr(io_counters, 'other_bytes') else 0
-                                
-                                # Добавляем данные в словарь
-                                process_data['disk_read'] = read_rate
-                                process_data['disk_write'] = write_rate
-                                process_data['network_sent'] = net_rate * 0.4  # 40% на исходящий трафик
-                                process_data['network_recv'] = net_rate * 0.6  # 60% на входящий трафик
-                        
-                        # Обновляем сохраненные значения
-                        self._process_io[proc_info['pid']] = {
-                            'counters': {
-                                'read_bytes': io_counters.read_bytes,
-                                'write_bytes': io_counters.write_bytes,
-                                'other_bytes': io_counters.other_bytes if hasattr(io_counters, 'other_bytes') else 0
+                    # Проверяем, что имя процесса не пустое и процесс существует
+                    if proc_info.processName and proc_info.processName != "":
+                        # Добавляем в список процессов
+                        processes.append({
+                            'pid': pid,
+                            'name': proc_info.processName,
+                            'cpu_percent': proc_info.cpuUsage,
+                            'memory_info': {
+                                'rss': proc_info.memoryUsage
                             },
-                            'time': current_time
-                        }
-                    
-                    ps_processes.append(process_data)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    continue
+                            'disk_read': proc_info.diskReadRate,
+                            'disk_write': proc_info.diskWriteRate,
+                            'network_sent': proc_info.networkSent,
+                            'network_recv': proc_info.networkReceived,
+                            # Добавляем флаг для системных процессов
+                            'is_system': pid < 100 or proc_info.processName.lower() in ['system', 'registry', 'smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe']
+                        })
+                        
+                        # Суммируем для общей статистики
+                        total_cpu_usage += proc_info.cpuUsage
+                        total_memory_usage += proc_info.memoryUsage
+                        total_disk_read += proc_info.diskReadRate
+                        total_disk_write += proc_info.diskWriteRate
+                        total_network_sent += proc_info.networkSent
+                        total_network_recv += proc_info.networkReceived
                 except Exception as e:
-                    debug_print(f"Ошибка обработки процесса через psutil: {e}")
+                    debug_print(f"Ошибка получения информации о процессе {pid}: {e}")
                     continue
             
-            debug_print(f"Получено {len(ps_processes)} процессов через psutil")
-            processes = ps_processes
+            # Обновляем общие метрики системы
+            self._system_cpu_usage = min(total_cpu_usage, 100.0)  # Ограничиваем 100%
+            
+            # Оцениваем общий объем памяти по сумме использования
+            total_memory = total_memory_usage * 1.2  # Предполагаем, что занято ~80%
+            available_memory = total_memory - total_memory_usage
+            memory_percent = (total_memory_usage / total_memory) * 100 if total_memory > 0 else 0
+            
+            self._system_memory = {
+                "total": total_memory,
+                "available": available_memory,
+                "percent": memory_percent
+            }
+            
+            self._system_disk_io = {
+                "read_bytes": total_disk_read,
+                "write_bytes": total_disk_write
+            }
+            
+            self._system_network_io = {
+                "bytes_sent": total_network_sent,
+                "bytes_recv": total_network_recv
+            }
+            
+            self._last_system_update = current_time
+            
+            debug_print(f"Успешно получено {len(processes)} процессов через DLL")
+            return processes
+            
         except Exception as e:
-            debug_print(f"Общая ошибка в get_processes: {e}")
+            debug_print(f"Ошибка при получении процессов: {e}")
+            return []
+
+    def get_cpu_usage(self) -> float:
+        """Возвращает общую загрузку процессора в процентах"""
+        if time.time() - self._last_system_update > 1.0:
+            # Обновляем все метрики, если прошло более 1 секунды
+            self.get_processes()
+        return self._system_cpu_usage
+
+    def get_memory_info(self) -> dict:
+        """Возвращает информацию об использовании памяти"""
+        if time.time() - self._last_system_update > 1.0:
+            # Обновляем все метрики, если прошло более 1 секунды
+            self.get_processes()
+        return self._system_memory
+
+    def get_disk_io(self) -> dict:
+        """Возвращает информацию о дисковой активности"""
+        if time.time() - self._last_system_update > 1.0:
+            # Обновляем все метрики, если прошло более 1 секунды
+            self.get_processes()
+        return self._system_disk_io
+
+    def get_network_io(self) -> dict:
+        """Возвращает информацию о сетевой активности"""
+        if time.time() - self._last_system_update > 1.0:
+            # Обновляем все метрики, если прошло более 1 секунды
+            self.get_processes()
+        return self._system_network_io
+
+    def get_cpu_freq(self) -> dict:
+        """Оценивает частоту процессора (используем фиксированное значение)"""
+        return {'current': 2400.0}  # Приблизительное значение в MHz
+
+    def get_boot_time(self) -> float:
+        """Возвращает примерное время загрузки системы"""
+        return time.time() - ctypes.windll.kernel32.GetTickCount64() / 1000.0
+
+    def get_processes(self) -> list:
+        """Возвращает список процессов с информацией"""
+        current_time = time.time()
         
-        return processes
+        # Обновляем данные только если прошло достаточно времени
+        if current_time - self._last_update_time > 1.0:
+            processes = self.get_processes_from_dll()
+            self._process_data_cache = processes
+            self._last_update_time = current_time
+        
+        return self._process_data_cache
 
 class DataCollector(QThread):
     data_updated = pyqtSignal(dict)
@@ -780,12 +285,9 @@ class DataCollector(QThread):
         self._stop_flag = threading.Event()
         self.interval = 1.0
         self._cache = {}
-        self._process_cache = {}
-        self._cache_lock = threading.Lock()
         self._process_lock = threading.Lock()
-        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.executor = ThreadPoolExecutor(max_workers=2)
         self._last_full_update = 0
-        self._full_update_interval = 5.0
         self.metrics = SystemMetrics()
         
     def run(self):
@@ -794,7 +296,8 @@ class DataCollector(QThread):
                 system_info = self.collect_system_info()
                 self.data_updated.emit(system_info)
                 time.sleep(max(0, self.interval - (time.time() % self.interval)))
-            except Exception:
+            except Exception as e:
+                debug_print(f"Ошибка в DataCollector.run: {e}")
                 continue
                 
     def stop(self):
@@ -804,20 +307,22 @@ class DataCollector(QThread):
     def collect_system_info(self) -> dict:
         current_time = time.time()
         
-        with self._cache_lock:
-            info = {
-                'cpu_percent': self.metrics.get_cpu_usage(),
-                'memory': self.metrics.get_memory_info(),
-                'disk': self.metrics.get_disk_io(),
-                'network': self.metrics.get_network_io(),
-                'cpu_freq': self.metrics.get_cpu_freq(),
-                'boot_time': self.metrics.get_boot_time(),
-                'last_update': current_time,
-                'processes': self.metrics.get_processes()  # Теперь это список процессов
-            }
-            
-            self._cache = info
-            return info
+        # Получаем все данные только от DLL
+        processes = self.metrics.get_processes()
+        
+        info = {
+            'cpu_percent': self.metrics.get_cpu_usage(),
+            'memory': self.metrics.get_memory_info(),
+            'disk': self.metrics.get_disk_io(),
+            'network': self.metrics.get_network_io(),
+            'cpu_freq': self.metrics.get_cpu_freq(),
+            'boot_time': self.metrics.get_boot_time(),
+            'last_update': current_time,
+            'processes': processes
+        }
+        
+        self._cache = info
+        return info
 
 class NumericTableWidgetItem(QTableWidgetItem):
     def __lt__(self, other):
@@ -1351,10 +856,6 @@ class TaskManagerWindow(QMainWindow):
         self.is_dark_theme = False
         self.data_collector = None
         
-        # Попытка повысить привилегии для работы со всеми процессами в системе
-        # Это особенно важно для EXE-версии
-        self.elevate_privileges()
-        
         # Инициализируем UI
         self.init_ui()
         
@@ -1366,47 +867,12 @@ class TaskManagerWindow(QMainWindow):
         self.update_timer.timeout.connect(self.update_window_title)
         self.update_timer.start(2000)  # Обновление каждые 2 секунды
         
-    def elevate_privileges(self):
-        """Повышает привилегии приложения для доступа к системным процессам"""
-        try:
-            # Проверяем, запущены ли мы с правами администратора
-            if not self.is_admin():
-                debug_print("Приложение не запущено с правами администратора. Некоторые процессы могут быть недоступны.")
-            else:
-                debug_print("Приложение запущено с правами администратора.")
-                
-            # Попытка включить привилегию отладки для доступа к системным процессам
-            SE_DEBUG_NAME = "SeDebugPrivilege"
-            privilege_id = win32security.LookupPrivilegeValue(None, SE_DEBUG_NAME)
-            
-            # Открываем токен процесса
-            hProcess = win32api.GetCurrentProcess()
-            hToken = win32security.OpenProcessToken(
-                hProcess, 
-                win32security.TOKEN_ADJUST_PRIVILEGES | win32security.TOKEN_QUERY
-            )
-            
-            # Включаем привилегию
-            new_privileges = [(privilege_id, win32security.SE_PRIVILEGE_ENABLED)]
-            win32security.AdjustTokenPrivileges(hToken, 0, new_privileges)
-            
-            debug_print("Привилегия SeDebugPrivilege успешно включена.")
-        except Exception as e:
-            debug_print(f"Ошибка при повышении привилегий: {e}")
-    
-    def is_admin(self):
-        """Проверяет, запущено ли приложение с правами администратора"""
-        try:
-            return ctypes.windll.shell32.IsUserAnAdmin()
-        except Exception as e:
-            debug_print(f"Ошибка при проверке прав администратора: {e}")
-            return False
-            
     def update_window_title(self):
         """Обновляет заголовок окна с количеством процессов"""
         try:
-            process_count = len(self.performance_tab.processes_tab.processes)
-            self.setWindowTitle(f"Диспетчер задач - {process_count} процессов")
+            if self.data_collector and self.data_collector._cache:
+                process_count = len(self.data_collector._cache.get('processes', []))
+                self.setWindowTitle(f"Диспетчер задач - {process_count} процессов")
         except:
             self.setWindowTitle("Диспетчер задач")
         
@@ -1847,14 +1313,6 @@ if __name__ == '__main__':
             None, "runas", sys.executable, " ".join(sys.argv), None, 1
         )
         sys.exit(0)
-    
-    # Импортируем и применяем CPU оптимизацию
-    try:
-        from cpu_optimizer import optimize_process_priority, set_process_affinity
-        optimize_process_priority()
-        set_process_affinity()
-    except ImportError:
-        debug_print("CPU оптимизатор не найден, запуск без оптимизации")
     
     debug_print("Запуск диспетчера задач с правами администратора")
     app = QApplication(sys.argv)

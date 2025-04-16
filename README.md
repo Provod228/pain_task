@@ -189,3 +189,5 @@ pyinstaller --clean --onefile launcher.spec
 - Visual Studio Profiler
 - Windows Performance Analyzer
 - ETW Events
+
+### ссылка на гитвики https://github.com/KJrTT/pain_task.git

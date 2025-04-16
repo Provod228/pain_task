@@ -190,4 +190,4 @@ pyinstaller --clean --onefile launcher.spec
 - Windows Performance Analyzer
 - ETW Events
 
-### ссылка на гитвики https://github.com/KJrTT/pain_task.git
+### 4. ссылка на гитвики https://github.com/KJrTT/pain_task.git
